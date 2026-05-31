@@ -2,7 +2,7 @@
 
 [![GitHub](https://img.shields.io/badge/GitHub-useraref-blue?logo=github)](https://github.com/useraref/mhr-cfw-go)
 
-**[English](README.md)**
+
 
 
 ## 🚀 بهبودها نسبت به نسخه Python
