@@ -1,138 +1,172 @@
-# [MHR-CFW](https://github.com/denuitt1/mhr-cfw) بازنویسی شده به زبان Go با رفع مشکل پشتیبانی YouTube و بهبود سرعت
+باشه، این هم **کل README یکپارچه، تمیز و اصلاح‌شده (همه‌چیز در یک جا)** 👇
+فقط کامل کپی کن جای README قبلی:
+
+````md
+# [MHR-CFW](https://github.com/denuitt1/mhr-cfw) بازنویسی شده به زبان Go
+
+> بهبود عملکرد، رفع مشکل پشتیبانی YouTube و افزایش سرعت و پایداری
 
 [![GitHub](https://img.shields.io/badge/GitHub-useraref-blue?logo=github)](https://github.com/useraref/mhr-cfw-go)
 
-
-
+---
 
 ## 🚀 بهبودها نسبت به نسخه Python
 
-### **✅ 1. رفع مشکل پشتیبانی YouTube**
-- مدیریت درست CORS — اضافه شدن هندل کردن preflight OPTIONS و تزریق هدرهای CORS برای درخواست‌های cross-origin
-- رفع مشکل Content-Encoding — دیکود بهتر برای پاسخ‌های brotli/gzip
-- پشتیبانی از Range request — استریم ویدیو نیاز به مدیریت درست هدر Range دارد
-
-### **✅ 2. بهبود سرعت**
-- استفاده از HTTP/2 به جای HTTP/1.1 (multiplexing سریع‌تر)
-- Connection pooling — استفاده مجدد از اتصال‌های TLS به جای ساختن اتصال جدید
-- Request coalescing — چند درخواست GET برای یک URL مشترک، یک تماس relay را به اشتراک می‌گذارند
-- Response caching — کش LRU با TTL مناسب برای assetهای استاتیک
-
-### **✅ 3. امنیت**
-- ارتقا از 2048 بیت به کلید های RSA با طول 4096 بیت برای گواهی‌های MITM
-
-### **✅ 4. قابلیت اطمینان**
-- مدیریت صحیح سیگنالها — خاموش شدن تمیز با Ctrl+C
-- مدیریت خطای بهتر — پاسخ‌های خطای مناسب
-
-### **✅ 5. کیفیت کد**
-- بازنویسی با Go — تایپ استاتیک، مدیریت حافظه بهتر
-- بدون وابستگی خارجی — استفاده از کتابخانه استاندارد در صورت امکان
-
-### **✨ 6. شعار**
-- **Internet for everyone or no one** — منعکس‌کننده روح دسترسی آزاد و باز به اینترنت.
+### ✅ 1. رفع مشکل پشتیبانی YouTube
+- مدیریت صحیح CORS و هندل کردن preflight OPTIONS
+- بهبود Content-Encoding (پشتیبانی بهتر gzip / brotli)
+- پشتیبانی کامل‌تر از Range Requests برای استریم ویدیو
 
 ---
 
-## نحوه کار
-
-این برنامه روی سیستم شما اجرا می‌شود و درخواست‌های شما را از طریق زیرساخت Google ارسال می‌کند. فیلترهای شبکه این ترافیک را به عنوان ترافیک عادی Google می‌بینند و اجازه عبور می‌دهند. در همین حین، Apps Script رایگان Google سایت واقعی مورد نظر شما را دریافت می‌کند.
+### ⚡ 2. بهبود سرعت
+- استفاده از HTTP/2 به جای HTTP/1.1 (Multiplexing سریع‌تر)
+- Connection Pooling (استفاده مجدد از اتصال‌ها)
+- Request Coalescing (اشتراک چند درخواست مشابه)
+- Response Caching (کش LRU با TTL برای منابع استاتیک)
 
 ---
 
-## شروع سریع
+### 🔐 3. امنیت
+- ارتقا گواهی‌های MITM به RSA 4096-bit
 
-### 📦 پیش‌نیازها:
-- [Go 1.22+](https://go.dev/dl/)
+---
 
-**💡 نکته:** اگر در نصب وابستگی‌های Go مشکل دارید، از میرور ایرانی رانفلر استفاده کنید:
+### 🛡️ 4. قابلیت اطمینان
+- خاموش شدن تمیز (Graceful Shutdown با Ctrl+C)
+- مدیریت بهتر خطاها و پاسخ‌ها
+
+---
+
+### 🧠 5. کیفیت کد
+- بازنویسی کامل با Go (Type-safe و سریع‌تر)
+- کاهش وابستگی‌ها و استفاده از استاندارد لایبرری‌ها
+
+---
+
+### ✨ 6. شعار
+> Internet for everyone or no one
+
+---
+
+## ⚙️ نحوه کار
+
+این برنامه روی سیستم شما اجرا می‌شود و درخواست‌ها را از طریق یک زیرساخت واسط (Google Apps Script) عبور می‌دهد تا به مقصد نهایی برسد.
+
+---
+
+## 🚀 شروع سریع
+
+### 📦 پیش‌نیازها
+- Go 1.22+
+
+اگر مشکل دانلود پکیج داشتی:
 ```bash
 GOPROXY=https://mirror-go.runflare.com go mod download
-
-### 2 - اجرای build.bat
-
-روی `build.bat` دوبار کلیک کنید یا اجرا کنید:
-
-```powershell
-.\build.bat
-```
-
-این کار فایل `mhr-cfw-go.exe` را می‌سازد
-
-### 3 - تنظیمات
-
-فایل `config.json` را با تنظیمات خود ویرایش کنید یا ترجیحاً Setup Wizard را در TUI اجرا کنید:
-
-```json
-{
-  "auth_key": "your-secret-password-here",
-  "script_id": "YOUR_DEPLOYMENT_ID"
-}
-```
-
-### 4 - اجرا
-
-روی `mhr-cfw-go.exe` دوبار کلیک کنید یا اجرا کنید:
-
-```powershell
-.\mhr-cfw-go.exe
-```
-
-برنامه یک منو باز می‌کند. گزینه `1) Start proxy` را انتخاب کنید تا پراکسی شروع شود.
+````
 
 ---
 
-### 5 - نصب CA Certificate (برای HTTPS)
-
-برنامه را اجرا کنید، سپس از منو گزینه `3) Install CA certificate` را انتخاب کنید.
-
-این کار Certificate Authority محلی را نصب می‌کند تا پراکسی بتواند ترافیک HTTPs را رهگیری کند.
-
----
-
-# 🛠️ نحوه راه‌اندازی
-
-1. فایل [mhr-cfw README](https://github.com/denuitt1/mhr-cfw/blob/main/README.md#how-to-use) را باز کنید و مراحل ارائه‌شده توسط [denuitt1](https://github.com/denuitt1) را دنبال کنید تا Deployment ID رو بگیرید.
-
----
-
-## ساخت از سورس
-
-پیش‌نیازها:
-
-* [Go 1.22+](https://go.dev/dl/)
+### 🛠️ ساخت پروژه
 
 ```bash
 go build -ldflags "-s -w" -o mhr-cfw-go.exe ./cmd/mhr-cfw
 ```
 
+یا:
 
-## گزینه‌های خط فرمان
-
-| Option             | Description                              |
-| ------------------ | ---------------------------------------- |
-| `--no-menu`        | اجرا بدون منوی TUI                       |
-| `--port`           | تغییر پورت پراکسی                        |
-| `--host`           | تغییر هاست listen                        |
-| `--socks5-port`    | تغییر پورت SOCKS5                        |
-| `--disable-socks5` | غیرفعال کردن پراکسی SOCKS5               |
-| `--log-level`      | تنظیم سطح لاگ (DEBUG, INFO, WARN, ERROR) |
-| `--install-cert`   | نصب CA certificate                       |
-| `--uninstall-cert` | حذف CA certificate                       |
-| `--scan`           | اسکن IPهای Google                        |
-| `--setup`          | اجرای setup wizard                       |
-| `--version`        | نمایش نسخه                               |
-
-#### سلب مسئولیت
-
-* **رعایت قوانین سرویس‌های Google:** اگر از Google Apps Script یا سایر سرویس‌های Google با این پروژه استفاده می‌کنید، مسئول رعایت Terms of Service، قوانین استفاده مجاز، quotaها و سیاست‌های پلتفرم هستید. استفاده نادرست ممکن است باعث تعلیق یا حذف اکانت Google یا deploymentهای شما شود.
+```powershell
+.\build.bat
+```
 
 ---
 
-## پروژه‌های اصلی
+### ⚙️ تنظیمات
 
-### بر پایه [mhr-cfw](https://github.com/denuitt1/mhr-cfw)، پیاده‌سازی Python که این پروژه از روی آن بازنویسی شده است.
+فایل `config.json`:
 
-## License
+```json
+{
+  "auth_key": "your-secret-password",
+  "script_id": "YOUR_DEPLOYMENT_ID"
+}
+```
+
+یا از Setup Wizard داخل برنامه استفاده کن.
+
+---
+
+### ▶️ اجرا
+
+```powershell
+.\mhr-cfw-go.exe
+```
+
+بعد از اجرا، از منو گزینه **Start proxy** را انتخاب کن.
+
+---
+
+### 🔐 نصب CA Certificate (HTTPS)
+
+از منو گزینه Install CA certificate را بزن.
+
+این کار برای رهگیری HTTPS لازم است.
+
+---
+
+## 🧭 راه‌اندازی کامل
+
+1. به ریپوی اصلی برو:
+   [https://github.com/denuitt1/mhr-cfw](https://github.com/denuitt1/mhr-cfw)
+
+2. مراحل گرفتن Deployment ID را طبق README دنبال کن.
+
+---
+
+## 🏗️ ساخت از سورس
+
+```bash
+go build -ldflags "-s -w" -o mhr-cfw-go.exe ./cmd/mhr-cfw
+```
+
+---
+
+## 🧩 گزینه‌های خط فرمان
+
+| Option           | Description         |
+| ---------------- | ------------------- |
+| --no-menu        | اجرای بدون TUI      |
+| --port           | تغییر پورت          |
+| --host           | تغییر host          |
+| --socks5-port    | SOCKS5 port         |
+| --disable-socks5 | غیرفعال کردن SOCKS5 |
+| --log-level      | سطح لاگ             |
+| --install-cert   | نصب CA              |
+| --uninstall-cert | حذف CA              |
+| --scan           | اسکن IP             |
+| --setup          | Setup wizard        |
+| --version        | نمایش نسخه          |
+
+---
+
+## ⚠️ سلب مسئولیت
+
+استفاده از این پروژه باید مطابق قوانین سرویس‌ها و کشور شما باشد.
+مسئولیت استفاده نادرست بر عهده کاربر است.
+
+---
+
+## 📌 پروژه اصلی
+
+بر پایه:
+
+* [https://github.com/denuitt1/mhr-cfw](https://github.com/denuitt1/mhr-cfw)
+
+---
+
+## 📄 License
 
 MIT
+
+```
+
