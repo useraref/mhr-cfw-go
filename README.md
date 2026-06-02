@@ -3,8 +3,6 @@
 
 > بهبود عملکرد، رفع مشکل پشتیبانی YouTube و افزایش سرعت و پایداری
 
-[![GitHub](https://img.shields.io/badge/GitHub-useraref-blue?logo=github)](https://github.com/useraref/mhr-cfw-go)
-
 ---
 
 ## 🚀 بهبودها نسبت به نسخه Python
