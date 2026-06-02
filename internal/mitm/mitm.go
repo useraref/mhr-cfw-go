@@ -70,7 +70,7 @@ func (m *Manager) getCertificate(domain string) (*tls.Certificate, error) {
 	if m.caKey == nil || m.caCert == nil {
 		m.ensureCA()
 	}
-	key, err := rsa.GenerateKey(rand.Reader, 4096)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +118,7 @@ func (m *Manager) ensureCA() {
 		}
 	}
 	_ = os.MkdirAll(caDir, 0700)
-	key, err := rsa.GenerateKey(rand.Reader, 4096)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
 	}

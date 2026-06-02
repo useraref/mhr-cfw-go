@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -19,7 +20,45 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
 	}
-	return Config(cfg), nil
+	c := Config(cfg)
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// Validate کانفیگ ضروری رو چک می‌کنه و خطای واضح می‌ده
+func (c Config) Validate() error {
+	// auth_key نباید خالی باشه
+	authKey := c.GetString("auth_key", "")
+	if strings.TrimSpace(authKey) == "" {
+		return fmt.Errorf("auth_key is required and must not be empty — set it in config.json")
+	}
+
+	// حداقل یک script_id باید باشه
+	ids := c.GetScriptIDs()
+	if len(ids) == 0 {
+		return fmt.Errorf("script_id (or script_ids) is required — set it in config.json")
+	}
+	for i, id := range ids {
+		if strings.TrimSpace(id) == "" {
+			return fmt.Errorf("script_ids[%d] is empty — all script IDs must be non-empty", i)
+		}
+	}
+
+	// پورت‌ها باید در محدوده معتبر باشن
+	listenPort := c.GetInt("listen_port", 8080)
+	if listenPort < 1 || listenPort > 65535 {
+		return fmt.Errorf("listen_port %d is out of range (1-65535)", listenPort)
+	}
+	if c.GetBool("socks5_enabled", true) {
+		socksPort := c.GetInt("socks5_port", 1080)
+		if socksPort < 1 || socksPort > 65535 {
+			return fmt.Errorf("socks5_port %d is out of range (1-65535)", socksPort)
+		}
+	}
+
+	return nil
 }
 
 func (c Config) Set(key string, value any) {

@@ -28,62 +28,72 @@ type Transport struct {
 	sniHosts    []string
 	sniIdx      uint32
 
-	once sync.Once
-	mu   sync.Mutex
-	h2   *http2.Transport
-	cli  *http.Client
+	mu  sync.Mutex
+	h2  *http2.Transport
+	cli *http.Client
 }
 
 func New(connectHost string, sniHosts []string, verifySSL bool) *Transport {
 	if len(sniHosts) == 0 {
 		sniHosts = []string{"www.google.com"}
 	}
-	return &Transport{
+	t := &Transport{
 		connectHost: connectHost,
 		verifySSL:   verifySSL,
 		sniHosts:    sniHosts,
 	}
+	t.build()
+	return t
 }
 
-func (t *Transport) ensure() {
-	t.once.Do(func() {
-		tr := &http2.Transport{
-			AllowHTTP: false,
-			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-				sni := t.nextSNI()
-				tlsCfg := &tls.Config{
-					ServerName:         sni,
-					InsecureSkipVerify: !t.verifySSL,
-					NextProtos:         []string{"h2", "http/1.1"},
-				}
-				dialer := &net.Dialer{Timeout: 15 * time.Second}
-				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(t.connectHost, "443"))
-				if err != nil {
-					return nil, err
-				}
-				if tcp, ok := conn.(*net.TCPConn); ok {
-					_ = tcp.SetNoDelay(true)
-				}
-				tlsConn := tls.Client(conn, tlsCfg)
-				if err := tlsConn.HandshakeContext(ctx); err != nil {
-					_ = conn.Close()
-					return nil, err
-				}
-				if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
-					_ = tlsConn.Close()
-					return nil, errors.New("h2 ALPN negotiation failed")
-				}
-				return tlsConn, nil
-			},
-		}
-		t.h2 = tr
-		t.cli = &http.Client{Transport: tr}
-		log.Infof("H2 transport ready -> %s", t.connectHost)
-	})
+// build یک transport جدید می‌سازه — قابل فراخوانی مجدد بعد از خطا
+func (t *Transport) build() {
+	tr := &http2.Transport{
+		AllowHTTP: false,
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			sni := t.nextSNI()
+			tlsCfg := &tls.Config{
+				ServerName:         sni,
+				InsecureSkipVerify: !t.verifySSL,
+				NextProtos:         []string{"h2", "http/1.1"},
+			}
+			dialer := &net.Dialer{Timeout: 15 * time.Second}
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(t.connectHost, "443"))
+			if err != nil {
+				return nil, err
+			}
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetNoDelay(true)
+			}
+			tlsConn := tls.Client(conn, tlsCfg)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
+				_ = tlsConn.Close()
+				return nil, errors.New("h2 ALPN negotiation failed")
+			}
+			return tlsConn, nil
+		},
+	}
+	t.h2 = tr
+	t.cli = &http.Client{Transport: tr}
+	log.Infof("H2 transport ready -> %s", t.connectHost)
+}
+
+// rebuild بعد از خطای شبکه transport رو از صفر می‌سازه
+func (t *Transport) rebuild() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.h2 != nil {
+		t.h2.CloseIdleConnections()
+	}
+	t.build()
+	log.Infof("H2 transport rebuilt -> %s", t.connectHost)
 }
 
 func (t *Transport) Request(ctx context.Context, method, path, host string, headers map[string]string, body []byte, timeout time.Duration) (int, map[string]string, []byte, error) {
-	t.ensure()
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
@@ -102,8 +112,15 @@ func (t *Transport) Request(ctx context.Context, method, path, host string, head
 	defer cancel()
 	req = req.WithContext(ctx)
 
-	resp, err := t.cli.Do(req)
+	t.mu.Lock()
+	cli := t.cli
+	t.mu.Unlock()
+
+	resp, err := cli.Do(req)
 	if err != nil {
+		if isNetworkError(err) {
+			t.rebuild()
+		}
 		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
@@ -124,6 +141,14 @@ func (t *Transport) Request(ctx context.Context, method, path, host string, head
 	return resp.StatusCode, respHeaders, data, nil
 }
 
+// UpdateHost برای IP failover از بیرون فراخوانی می‌شه
+func (t *Transport) UpdateHost(connectHost string) {
+	t.mu.Lock()
+	t.connectHost = connectHost
+	t.mu.Unlock()
+	t.rebuild()
+}
+
 func (t *Transport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -138,4 +163,16 @@ func (t *Transport) Close() error {
 func (t *Transport) nextSNI() string {
 	idx := atomic.AddUint32(&t.sniIdx, 1)
 	return t.sniHosts[int(idx)%len(t.sniHosts)]
+}
+
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "EOF") ||
+		strings.Contains(s, "no route to host") ||
+		strings.Contains(s, "connection refused")
 }

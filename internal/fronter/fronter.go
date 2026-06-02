@@ -30,6 +30,9 @@ import (
 
 var log = logging.Get("Fronter")
 
+// regex در سطح package کامپایل می‌شه — نه داخل هر تابع
+var statusLineRegex = regexp.MustCompile(`\d{3}`)
+
 type HostStat struct {
 	Requests       int
 	CacheHits      int
@@ -39,15 +42,17 @@ type HostStat struct {
 }
 
 type DomainFronter struct {
-	connectHost string
-	sniHost     string
-	sniHosts    []string
-	sniIdx      uint32
-	httpHost    string
-	scriptIDs   []string
-	scriptIdx   uint32
-	devAvail    bool
-
+	// لیست کامل IPs برای failover
+	googleIPs    []string
+	googleIPIdx  uint32
+	connectHost  string
+	sniHost      string
+	sniHosts     []string
+	sniIdx       uint32
+	httpHost     string
+	scriptIDs    []string
+	scriptIdx    uint32
+	devAvail     bool
 	parallelRelay int
 
 	perSite   map[string]*HostStat
@@ -69,9 +74,15 @@ type DomainFronter struct {
 	batchTimer   *time.Timer
 
 	coalesceMu sync.Mutex
-	coalesce   map[string][]chan []byte
+	coalesce   map[string][]chan coalesceResult
 
 	statsStop chan struct{}
+}
+
+// coalesceResult هم مقدار هم خطا رو نگه می‌داره تا waiterها block نمونن
+type coalesceResult struct {
+	data []byte
+	err  error
 }
 
 type pooledConn struct {
@@ -99,13 +110,19 @@ func New(cfg config.Config) *DomainFronter {
 		parallel = len(ids)
 	}
 
-	connectHost := cfg.GetString("google_ip", "216.239.38.120")
-	// در صورت وجود google_ips اولین IP را بگیر (برای failover بعداً می‌شود اضافه کرد)
-	if ips := cfg.GetStringSlice("google_ips"); len(ips) > 0 {
-		connectHost = ips[0]
+	// همه IPs رو جمع‌آوری کن برای failover
+	googleIPs := cfg.GetStringSlice("google_ips")
+	if len(googleIPs) == 0 {
+		if single := cfg.GetString("google_ip", "216.239.38.120"); single != "" {
+			googleIPs = []string{single}
+		} else {
+			googleIPs = []string{"216.239.38.120"}
+		}
 	}
+	connectHost := googleIPs[0]
 
 	f := &DomainFronter{
+		googleIPs:     googleIPs,
 		connectHost:   connectHost,
 		sniHost:       frontDomain,
 		sniHosts:      fronts,
@@ -118,12 +135,15 @@ func New(cfg config.Config) *DomainFronter {
 		tlsTO:         time.Duration(cfg.GetInt("tls_connect_timeout", constants.TLSConnectTimeout)) * time.Second,
 		maxResp:       cfg.GetInt("max_response_body_bytes", constants.MaxResponseBodyBytes),
 		parallelRelay: parallel,
-		coalesce:      map[string][]chan []byte{},
+		coalesce:      map[string][]chan coalesceResult{},
 		statsStop:     make(chan struct{}),
 	}
 
 	if len(fronts) > 1 {
 		log.Infof("SNI rotation pool (%d): %s", len(fronts), strings.Join(fronts, ", "))
+	}
+	if len(googleIPs) > 1 {
+		log.Infof("IP failover pool (%d): %s", len(googleIPs), strings.Join(googleIPs, ", "))
 	}
 	if parallel > 1 {
 		log.Infof("Fan-out relay: %d parallel Apps Script instances per request", parallel)
@@ -131,8 +151,48 @@ func New(cfg config.Config) *DomainFronter {
 	log.Infof("Response codecs: %s", codec.SupportedEncodings())
 
 	f.h2 = h2.New(f.connectHost, f.sniHosts, f.verifySSL)
+
+	// Pool warm-up: اتصال‌های آماده از قبل بساز
+	go f.warmPool()
 	go f.statsLoop()
 	return f
+}
+
+// warmPool اتصال‌های اولیه pool رو از قبل می‌سازه تا اولین requestها کند نباشن
+func (f *DomainFronter) warmPool() {
+	count := constants.WarmPoolCount
+	if count > constants.PoolMax {
+		count = constants.PoolMax
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4) // حداکثر ۴ اتصال موازی هنگام warm-up
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			conn, err := f.dialFresh()
+			if err != nil {
+				return
+			}
+			f.release(conn)
+		}()
+	}
+	wg.Wait()
+	f.poolMu.Lock()
+	actual := len(f.pool)
+	f.poolMu.Unlock()
+	log.Infof("Pool warm-up complete: %d/%d connections ready", actual, count)
+}
+
+// nextGoogleIP برای IP failover به ترتیب round-robin IP بعدی رو برمی‌گردونه
+func (f *DomainFronter) nextGoogleIP() string {
+	if len(f.googleIPs) == 1 {
+		return f.googleIPs[0]
+	}
+	idx := atomic.AddUint32(&f.googleIPIdx, 1)
+	return f.googleIPs[int(idx)%len(f.googleIPs)]
 }
 
 func buildSNIPool(frontDomain string, overrides []string) []string {
@@ -222,13 +282,21 @@ func (f *DomainFronter) Relay(method, urlStr string, headers map[string]string, 
 func (f *DomainFronter) tryCoalesce(key string, payload map[string]any) ([]byte, bool) {
 	f.coalesceMu.Lock()
 	if waiters, ok := f.coalesce[key]; ok {
-		ch := make(chan []byte, 1)
+		ch := make(chan coalesceResult, 1)
 		f.coalesce[key] = append(waiters, ch)
 		f.coalesceMu.Unlock()
-		resp := <-ch
-		return resp, true
+		// اگه timeout بخوره یا خطا بیاد، به جای block شدن، خطا برمی‌گردونه
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				return f.errorResponse(502, res.err.Error()), true
+			}
+			return res.data, true
+		case <-time.After(f.relayTO + 5*time.Second):
+			return f.errorResponse(504, "coalesce timeout"), true
+		}
 	}
-	f.coalesce[key] = []chan []byte{}
+	f.coalesce[key] = []chan coalesceResult{}
 	f.coalesceMu.Unlock()
 
 	resp, err := f.batchSubmit(payload)
@@ -240,8 +308,11 @@ func (f *DomainFronter) tryCoalesce(key string, payload map[string]any) ([]byte,
 	waiters := f.coalesce[key]
 	delete(f.coalesce, key)
 	f.coalesceMu.Unlock()
+
+	// همه waiterها رو آزاد کن — با خطا یا بدون خطا
+	result := coalesceResult{data: resp, err: err}
 	for _, ch := range waiters {
-		ch <- resp
+		ch <- result
 	}
 	return resp, true
 }
@@ -314,7 +385,8 @@ func (f *DomainFronter) relaySingle(payload map[string]any) ([]byte, error) {
 		return f.parseRelayResponse(body), nil
 	}
 
-	resp, err := f.relayHTTP1(path, jsonBody)
+	// fallback به HTTP/1 با IP failover
+	resp, err := f.relayHTTP1WithFailover(path, jsonBody)
 	if err != nil {
 		return nil, err
 	}
@@ -337,11 +409,78 @@ func (f *DomainFronter) relayBatch(batch []batchItem) ([][]byte, error) {
 	if err == nil {
 		return f.parseBatchBody(body, len(batch))
 	}
-	resp, err := f.relayHTTP1(path, jsonBody)
+	resp, err := f.relayHTTP1WithFailover(path, jsonBody)
 	if err != nil {
 		return nil, err
 	}
 	return f.parseBatchBody(resp, len(batch))
+}
+
+// relayHTTP1WithFailover در صورت خطا IP بعدی رو امتحان می‌کنه
+func (f *DomainFronter) relayHTTP1WithFailover(path string, body []byte) ([]byte, error) {
+	var lastErr error
+	tried := map[string]bool{}
+	for attempt := 0; attempt < len(f.googleIPs); attempt++ {
+		ip := f.nextGoogleIP()
+		if tried[ip] {
+			continue
+		}
+		tried[ip] = true
+
+		resp, err := f.relayHTTP1OnIP(ip, path, body)
+		if err == nil {
+			// اگه این IP کار کرد و با IP فعلی فرق داره، H2 رو هم آپدیت کن
+			if ip != f.connectHost {
+				f.connectHost = ip
+				f.h2.UpdateHost(ip)
+				log.Infof("IP failover: switched to %s", ip)
+			}
+			return resp, nil
+		}
+		lastErr = err
+		log.Warnf("IP %s failed: %v", ip, err)
+	}
+	return nil, fmt.Errorf("all IPs failed, last error: %w", lastErr)
+}
+
+func (f *DomainFronter) relayHTTP1OnIP(ip, path string, body []byte) ([]byte, error) {
+	dialer := &net.Dialer{Timeout: f.tlsTO}
+	conn, err := dialer.Dial("tcp", net.JoinHostPort(ip, "443"))
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetNoDelay(true)
+	}
+	sni := f.nextSNI()
+	tlsConn := tls.Client(conn, &tls.Config{ServerName: sni, InsecureSkipVerify: !f.verifySSL})
+	if err := tlsConn.Handshake(); err != nil {
+		return nil, err
+	}
+	req := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n", path, f.httpHost, len(body))
+	if _, err := tlsConn.Write([]byte(req)); err != nil {
+		return nil, err
+	}
+	if _, err := tlsConn.Write(body); err != nil {
+		return nil, err
+	}
+	status, headers, respBody, err := readHTTPResponse(tlsConn, f.maxResp)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 300 && status < 400 {
+		loc := headers["location"]
+		if loc != "" {
+			parsed, _ := url.Parse(loc)
+			rpath := parsed.Path
+			if parsed.RawQuery != "" {
+				rpath += "?" + parsed.RawQuery
+			}
+			return f.relayHTTP1OnIP(ip, rpath, body)
+		}
+	}
+	return respBody, nil
 }
 
 func (f *DomainFronter) relayHTTP1(path string, body []byte) ([]byte, error) {
@@ -385,7 +524,8 @@ func readHTTPResponse(conn net.Conn, maxBody int) (int, map[string]string, []byt
 		return 0, nil, nil, err
 	}
 	status := 0
-	if m := regexp.MustCompile(`\d{3}`).FindString(statusLine); m != "" {
+	// استفاده از regex کامپایل‌شده در سطح package
+	if m := statusLineRegex.FindString(statusLine); m != "" {
 		status, _ = strconv.Atoi(m)
 	}
 	headers := map[string]string{}
@@ -429,19 +569,8 @@ func readHTTPResponse(conn net.Conn, maxBody int) (int, map[string]string, []byt
 	return status, headers, body, nil
 }
 
-func (f *DomainFronter) acquire() (net.Conn, error) {
-	f.poolMu.Lock()
-	for len(f.pool) > 0 {
-		pc := f.pool[len(f.pool)-1]
-		f.pool = f.pool[:len(f.pool)-1]
-		if time.Since(pc.created) < time.Duration(constants.ConnTTL*float64(time.Second)) {
-			f.poolMu.Unlock()
-			return pc.conn, nil
-		}
-		_ = pc.conn.Close()
-	}
-	f.poolMu.Unlock()
-
+// dialFresh یک اتصال TLS جدید می‌سازه (برای pool warm-up)
+func (f *DomainFronter) dialFresh() (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: f.tlsTO}
 	conn, err := dialer.Dial("tcp", net.JoinHostPort(f.connectHost, "443"))
 	if err != nil {
@@ -456,6 +585,21 @@ func (f *DomainFronter) acquire() (net.Conn, error) {
 		return nil, err
 	}
 	return tlsConn, nil
+}
+
+func (f *DomainFronter) acquire() (net.Conn, error) {
+	f.poolMu.Lock()
+	for len(f.pool) > 0 {
+		pc := f.pool[len(f.pool)-1]
+		f.pool = f.pool[:len(f.pool)-1]
+		if time.Since(pc.created) < time.Duration(constants.ConnTTL*float64(time.Second)) {
+			f.poolMu.Unlock()
+			return pc.conn, nil
+		}
+		_ = pc.conn.Close()
+	}
+	f.poolMu.Unlock()
+	return f.dialFresh()
 }
 
 func (f *DomainFronter) release(conn net.Conn) {

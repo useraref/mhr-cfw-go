@@ -24,6 +24,7 @@ import (
 )
 
 var log = logging.Get("Proxy")
+// regex در سطح package کامپایل می‌شه — نه داخل هر request
 var maxAgeRegex = regexp.MustCompile(`max-age=(\d+)`)
 
 type ResponseCache struct {
@@ -106,7 +107,6 @@ func (c *ResponseCache) ParseTTL(raw []byte, urlStr string) int {
 		return 0
 	}
 	head := strings.ToLower(string(raw[:idx]))
-	// پشتیبانی از پاسخ‌های 206 Partial Content
 	if !strings.HasPrefix(string(raw[:12]), "HTTP/1.1 200") && !strings.HasPrefix(string(raw[:12]), "HTTP/1.1 206") {
 		return 0
 	}
@@ -180,7 +180,6 @@ func splitHostPort(target string, defPort int) (string, int) {
 		return host, port
 	}
 	if strings.Contains(target, ":") {
-		//有可能是 IPv6 但没有端口
 		if strings.Count(target, ":") > 1 {
 			return target, defPort
 		}
@@ -334,6 +333,9 @@ func (s *Server) relayHTTPStream(host string, port int, conn net.Conn) {
 			}
 		}
 		method, path := parseRequestLine(line)
+
+		// deadline رو قبل از خواندن body تمدید کن تا slow upload قطع نشه
+		conn.SetDeadline(time.Now().Add(time.Duration(constants.ClientIdleTimeout) * time.Second))
 		body, err := readBody(reader, headers)
 		if err != nil {
 			return
@@ -351,10 +353,36 @@ func (s *Server) relayHTTPStream(host string, port int, conn net.Conn) {
 			continue
 		}
 
+		// --- Cache check ---
+		cacheKey := method + "|" + urlStr
+		isCacheable := strings.ToUpper(method) == "GET" && len(body) == 0 &&
+			headerValue(headerMap, "range") == "" &&
+			headerValue(headerMap, "authorization") == "" &&
+			headerValue(headerMap, "cookie") == ""
+
+		if isCacheable {
+			if cached := s.cache.Get(cacheKey); cached != nil {
+				log.Infof("Cache HIT -> %s", urlStr)
+				if origin != "" {
+					cached = injectCORSHeaders(cached, origin)
+				}
+				_, _ = conn.Write(cached)
+				continue
+			}
+		}
+
 		response := s.fronter.Relay(method, urlStr, headerMap, body)
 		if origin != "" {
 			response = injectCORSHeaders(response, origin)
 		}
+
+		// response رو cache کن اگه قابل کش باشه
+		if isCacheable {
+			if ttl := s.cache.ParseTTL(response, urlStr); ttl > 0 {
+				s.cache.Put(cacheKey, response, ttl)
+			}
+		}
+
 		_, _ = conn.Write(response)
 	}
 }
@@ -375,10 +403,34 @@ func (s *Server) handlePlainHTTP(conn net.Conn, reader *bufio.Reader, headers []
 		return
 	}
 	urlStr := path
+
+	// Cache check برای plain HTTP هم
+	cacheKey := method + "|" + urlStr
+	isCacheable := strings.ToUpper(method) == "GET" && len(body) == 0 &&
+		headerValue(headerMap, "authorization") == "" &&
+		headerValue(headerMap, "cookie") == ""
+
+	if isCacheable {
+		if cached := s.cache.Get(cacheKey); cached != nil {
+			if origin != "" {
+				cached = injectCORSHeaders(cached, origin)
+			}
+			_, _ = conn.Write(cached)
+			return
+		}
+	}
+
 	response := s.fronter.Relay(method, urlStr, headerMap, body)
 	if origin != "" {
 		response = injectCORSHeaders(response, origin)
 	}
+
+	if isCacheable {
+		if ttl := s.cache.ParseTTL(response, urlStr); ttl > 0 {
+			s.cache.Put(cacheKey, response, ttl)
+		}
+	}
+
 	_, _ = conn.Write(response)
 }
 
@@ -481,8 +533,9 @@ func parseHeaders(lines []string) map[string]string {
 func readBody(reader *bufio.Reader, headers []string) ([]byte, error) {
 	cl := 0
 	for _, ln := range headers {
-		if strings.HasPrefix(strings.ToLower(ln), "content-length:") {
-			v := strings.TrimSpace(strings.TrimPrefix(ln, "Content-Length:"))
+		lower := strings.ToLower(ln)
+		if strings.HasPrefix(lower, "content-length:") {
+			v := strings.TrimSpace(ln[len("content-length:"):])
 			n, err := strconv.Atoi(v)
 			if err != nil || n < 0 {
 				return nil, errors.New("invalid Content-Length")
